@@ -1,0 +1,121 @@
+#!/usr/bin/env python
+
+
+DOCUMENTATION = '''
+---
+module: kill_idle_tty
+author: Anton Bulanov
+version_added: "1.0.0"
+short_description: terminates tty  sessions with  idle timeouts longer then specified
+description:
+    - terminates tty sessions with  idle timeouts longer then specified
+#requirements:
+#    - junos-eznc >= 1.2.2
+options:
+  host:
+    description:
+        - Set to {{ inventory_hostname }}
+    required: false
+    default: None
+  user:
+    description:
+        - Login username
+    required: false
+    default: $USER
+  passwd:
+    description:
+        - Login password
+    required: false
+    default: assumes ssh-key active
+  port:
+    description:
+        - port number to use when connecting to the device
+    required: false
+    default: 830
+  ssh_private_key_file:
+    description:
+        - This can be used if you need to provide a private key rather than
+          loading the key into the ssh-key-ring/environment.  if your
+          ssh-key requires a password, then you must provide it via
+          **passwd**
+    required: false
+    default: None
+  max_idle_timeout:
+    description:
+        - Maximum allowed idle timeout in seconds, after which user sessions are to be terminated
+    required: false
+    default: 7200
+'''
+EXAMPLES = '''
+# Simple example
+ tasks:
+  - name: "Terminate idle ttys"
+    junos_kill_idle_tty:
+       host: "{{ inventory_hostname }}"
+       user: "admin"
+       passwd: "qqq111"
+       max_idle_timeout: 60
+    register: result
+  - debug:
+       var: result
+'''
+
+
+from lxml import etree
+from jnpr.junos import Device 
+import jnpr.junos.exception
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            host=dict(required=False, default=None),    # host or ipaddr
+            user=dict(required=False, default=os.getenv('USER')),
+            passwd=dict(required=False, default=None, no_log=True),
+            max_idle_timeout=dict(required=False, default=7200),
+#            logfile=dict(required=False, default=None),
+            port=dict(required=False, default=830),
+            ssh_private_key_file=dict(required=False, default=None),
+#            mode=dict(required=False, default=None)
+        ),
+        supports_check_mode=False)
+
+    args = module.params
+
+    results={}
+    msg=''
+    max_idle_timeout=args['max_idle_timeout']
+
+    try:
+        dev=Device(args['host'], user=args['user'], password=args['passwd'], port=args['port'], 
+                       ssh_private_key_file=args['ssh_private_key_file'], mode=args['mode'], gather_facts=False)
+        dev.open()
+    except Exception as err:
+        msg = 'unable to connect to {0}: {1}'.format(args['host'], str(err))
+#        logging.error(msg)
+        module.fail_json(msg=msg)
+        # --- UNREACHABLE ---
+
+
+    resp = dev.rpc.get_system_users_information(normalize=True)
+
+    users = resp.xpath("uptime-information/user-table/user-entry[idle-time[@seconds>{0}]]".format(max_idle_timeout))
+    #print users
+    for user in users:
+        tty2kill = user.find('tty').text
+        idletimeout = user.find('idle-time').attrib['seconds']
+        if tty2kill != 'v0':
+            dev.rpc.request_logout_user(terminal=tty2kill)
+            msg = msg + 'User {}@{} has been kicked off due to idle timeout of {} \n'.format(user.find('user').text, tty2kill, idletimeout)
+            results['changed'] = True
+    results['msg'] = msg
+    dev.close()
+
+    module.exit_json(**results)
+
+
+
+from ansible.module_utils.basic import *
+
+if __name__ == '__main__':
+    main()
+
